@@ -7,16 +7,21 @@ import requests
 
 get = memosa.memoize1(requests.get)
 
+url = 'https://jsonplaceholder.typicode.com/todos/1'
+
 with memosa.context():
 
-    response = get('http://ipv4.download.thinkbroadband.com/5MB.zip')
+    response = get(url)
 
-    print('same?', response is get('http://ipv4.download.thinkbroadband.com/5MB.zip'))
+    # True
+    print('same?', response is get(url))
 
     with memosa.context():
+        # False
+        print('same?', response is get(url))
 
-        print('same?', response is get('http://ipv4.download.thinkbroadband.com/5MB.zip'))
+    # True
+    print('same?', response is get(url))
 
-    print('same?', response is get('http://ipv4.download.thinkbroadband.com/5MB.zip'))
-
-print('same?', response is get('http://ipv4.download.thinkbroadband.com/5MB.zip'))
+# False
+print('same?', response is get(url))
