@@ -1,17 +1,12 @@
-#!/usr/bin/env python3.7
 
-import logging
-from functools import partial, wraps
-from collections import defaultdict
-from contextlib import contextmanager
-from contextvars import ContextVar
+from functools import wraps, partial
 from inspect import isgeneratorfunction
+import logging, warnings
 
-from simplejson import load, dump
+from .context import current_context, context
+from .json import context as _json_context
 
-__all__ = 'context', 'json', 'memoize1'
-
-_context = ContextVar('memosa.context')
+__all__ = 'context', 'memoize1', 'memoize2', 'json'
 
 logger = logging.getLogger(__name__)
 
@@ -26,114 +21,70 @@ def decorator(func):
             return partial(func, **kwargs)
     return decorate
 
+
+def _memoize(alias, key, func):
+    """
+    """
+    global current_context
+    try:
+        context = current_context.get()
+    except LookupError:
+        value = func()
+    else:
+        cache = context[alias]
+        key = str(key) # fix for JSON
+        try:
+            value = cache[key]
+        except KeyError:
+            logger.info('cache miss %s %s' % (alias, key))
+            value = cache[key] = func()
+        else:
+            logger.info('cache hit %s %s' % (alias, key))
+    return value
+
 @decorator
 def memoize1(func, label=None):
-    "use qualname and first argument to memoize"
-    "memoization requires context"
-
-    partition_key = label or func.__qualname__
+    """
+    decorated function must accept one argument
+    str(argument) will be used to cache the returned value
+    if the function is a generator the result will be a tuple
+    """
+    alias = label or func.__qualname__
 
     if isgeneratorfunction(func):
-        get_value = lambda key : tuple(func(key))
+        func2 = lambda key : tuple(func(key))
     else:
-        get_value = func
+        func2 = func
 
     @wraps(func)
-    def memoized(key):
-        nonlocal func, partition_key, get_value
-        try:
-            context = _context.get()
-        except LookupError:
-            # no context, memoization is disabled
-            return get_value(key)
-        else:
-            memoized = context[partition_key]
-            try:
-                obj = memoized[key]
-            except KeyError:
-                logger.info('cache miss %s %s' % (partition_key, key))
-                obj = memoized[key] = get_value(key)
-            else:
-                logger.info('cache hit %s %s' % (partition_key, key))
-            return obj
-
-    return memoized
+    def wrap(key):
+        global _memoize
+        nonlocal func2, alias
+        return _memoize(alias, key, lambda : func2(key))
+    return wrap
 
 @decorator
-def wraps_context(func, if_exists=False):
-    "if running in memoization context, apply wrapper"
-    @contextmanager
-    def custom_context(*args, **kwargs):
-        try:
-            current_context = _context.get()
-        except LookupError:
-            if if_exists:
-                yield
-            else:
-                with context() as current_context:
-                    with func(current_context, *args, **kwargs) as value:
-                        yield current_context if value == None else value
-        else:
-            with func(current_context, *args, **kwargs) as value:
-                yield current_context if value == None else value
-    return custom_context
-
-@wraps_context
-@contextmanager
-def json(context, filename, use_decimal=False, iterable_as_array=True):
+def memoize2(func, label=None):
     """
-    persist context in JSON format
-    note that keys will be converted to strings!
+    decorated function is a generator
+    first yield is the cache key (usually created from the arguments)
+    second yield is the value, which will only execute on cache miss
+
+    @memoize2
+    def add(x, y):
+        yield f'{x}+{y}'
+        yield x + y
     """
-    global load, dump
-    load = partial(load, use_decimal=use_decimal)
-    dump = partial(dump, use_decimal=use_decimal, iterable_as_array=iterable_as_array)
-    try:
-        logger.info('loading %r (json) into %r' % (filename, context))
-        with open(filename) as stream:
-            context.update(load(stream))
-        logger.info('loaded %r (json) into %r' % (filename, context))
-    except FileNotFoundError:
-        logger.info('json not found %r' % filename)
-    finally:
-        try:
-            yield
-        finally:
-            logger.info('saving %r to %r (json)' % (context, filename))
-            with open(filename, 'w') as stream:
-                dump(context, stream)
+    alias = label or func.__qualname__
+    @wraps(func)
+    def wrap(*args, **kwargs):
+        global _memoize
+        nonlocal func, alias
+        gen = func(*args, **kwargs)
+        return _memoize(alias, next(gen), lambda : next(gen))
+    return wrap
 
-@contextmanager
-def context():
-    "initializes memoization context"
-    obj = Context()
-    token = _context.set(obj)
-    try:
-        logger.info('entering context %r' % obj)
-        yield obj
-    finally:
-        logger.info('leaving context %r' % obj)
-        _context.reset(token)
 
-class Context(defaultdict):
-    """
-    {qualname: {memoize key : memoized value}}
-    """
-
-    def __init__(self):
-        super().__init__(dict)
-
-    def __repr__(self):
-        if len(self) < 100:
-            summary = ','.join('%s[%s]' % (key, len(value)) for key, value in self.items())
-        else:
-            summary = ','.join(self)
-        return '<memosa.Context[%s]>' % summary
-
-    def run(self, func, *args, **kwargs):
-        "run a function in this context -- useful for threading"
-        token = _context.set(self)
-        try:
-            return func(*args, **kwargs)
-        finally:
-            _context.reset(token)
+def json(*args, **kwargs):
+    warnings.warn("memosa.json() will be removed.  use memosa.json.context() instead", category=DeprecationWarning, stacklevel=2)
+    return _json_context(*args, **kwargs)
